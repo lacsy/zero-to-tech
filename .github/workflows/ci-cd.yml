@@ -101,6 +101,18 @@ jobs:
           printf '%s\n' "$(printf '%s' "$SSH_KEY" | tr -d '\r')" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
+          # ── Secret 内容体检：只打印元信息（行数/头尾行），不打印钥匙本体 ──
+          echo "── Secret 内容体检 ──────────────────────────────"
+          echo "字节数   : $(printf '%s' "$SSH_KEY" | wc -c | tr -d ' ')"
+          echo "行数     : $(printf '%s' "$SSH_KEY" | wc -l | tr -d ' ')"
+          echo "首行     : $(printf '%s' "$SSH_KEY" | head -c 40)"
+          echo "末行     : $(printf '%s' "$SSH_KEY" | tail -n1)"
+          echo "字面\\n   : $(printf '%s' "$SSH_KEY" | grep -o '\\n' | wc -l | tr -d ' ') 处"
+          echo "BEGIN 行 : $(printf '%s' "$SSH_KEY" | grep -c -- '-----BEGIN' | tr -d ' ') 处"
+          echo "END 行   : $(printf '%s' "$SSH_KEY" | grep -c -- '-----END' | tr -d ' ') 处"
+          echo "──────────────────────────────────────────────────"
+          echo "（对照正常的 ed25519 私钥：≈400 字节 / 4 行 / 首行 -----BEGIN OPENSSH PRIVATE KEY----- / 末行 -----END OPENSSH PRIVATE KEY----- / 字面\\n 0 处 / BEGIN 与 END 各 1 处）"
+
           # 校验：解析不了就立刻报错并说明原因，不再等到 rsync 才莫名其妙地挂
           if ! ssh-keygen -y -f ~/.ssh/deploy_key > /tmp/pub.key 2>/tmp/key.err; then
             echo "::error::Secret 里的私钥无法被 ssh 解析：$(cat /tmp/key.err)"
