@@ -113,8 +113,10 @@ jobs:
           echo "──────────────────────────────────────────────────"
           echo "（对照正常的 ed25519 私钥：≈400 字节 / 4 行 / 首行 -----BEGIN OPENSSH PRIVATE KEY----- / 末行 -----END OPENSSH PRIVATE KEY----- / 字面\\n 0 处 / BEGIN 与 END 各 1 处）"
 
-          # 校验：解析不了就立刻报错并说明原因，不再等到 rsync 才莫名其妙地挂
-          if ! ssh-keygen -y -f ~/.ssh/deploy_key > /tmp/pub.key 2>/tmp/key.err; then
+          # 校验：-P "" 显式用空密码尝试解密。
+          # 这样"钥匙带密码"会报出明确的 incorrect passphrase，而不是笼统的 error in libcrypto，
+          # 两种情况就能彻底分开。
+          if ! ssh-keygen -y -P "" -f ~/.ssh/deploy_key > /tmp/pub.key 2>/tmp/key.err; then
             echo "::error::Secret 里的私钥无法被 ssh 解析：$(cat /tmp/key.err)"
             echo "::error::常见原因：① 这把钥匙其实设了密码（CI 里无法交互输入）"
             echo "::error::            ② 复制时丢了 -----BEGIN/END ... PRIVATE KEY----- 头尾"
