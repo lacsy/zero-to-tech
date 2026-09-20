@@ -16,7 +16,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# 默认只给读权限，需要写权限的 job 单独声明（最小权限原则）。
+# 默认只给读权限。
 permissions:
   contents: read
 
@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 检查部署所需 Secrets 是否已配置
-        # 缺 Secret 时给出能看懂的提示，而不是一句晦涩的 rsync 报错
+        # 缺 Secret 时给出能看懂的提示，而不是一句晦涩的报错
         env:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
@@ -91,16 +91,38 @@ jobs:
           name: web-dist
           path: dist
 
+      - name: 写入并校验 SSH 私钥
+        env:
+          SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          # 归一化：清掉可能混入的 \r，并保证结尾恰好一个换行。
+          # 这两个是最常见的"钥匙看着没问题却加载失败"的原因。
+          printf '%s\n' "$(printf '%s' "$SSH_KEY" | tr -d '\r')" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          # 校验：解析不了就立刻报错并说明原因，不再等到 rsync 才莫名其妙地挂
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key > /tmp/pub.key 2>/tmp/key.err; then
+            echo "::error::Secret 里的私钥无法被 ssh 解析：$(cat /tmp/key.err)"
+            echo "::error::常见原因：① 这把钥匙其实设了密码（CI 里无法交互输入）"
+            echo "::error::            ② 复制时丢了 -----BEGIN/END ... PRIVATE KEY----- 头尾"
+            echo "::error::            ③ 换行被贴成了字面的 \\n 字符"
+            echo "::error::推荐用 gh 绕过剪贴板重写：gh secret set SERVER_SSH_KEY < ~/.ssh/gh_deploy"
+            exit 1
+          fi
+
+          # 打印公钥指纹（公开信息，可以放心展示）。
+          # 和本地 `ssh-keygen -lf ~/.ssh/gh_deploy` 的输出对比：
+          #   一致 → Secret 内容就是这把钥匙，问题不在它
+          #   不一致 → Secret 被改坏了，重写 Secret
+          echo "Secret 中钥匙的公钥指纹："
+          ssh-keygen -lf /tmp/pub.key
+
       - name: 同步到服务器
-        # rsync --delete：让服务器目录与本次构建完全一致，不留旧文件。
-        # --exclude=.well-known：避免误删 HTTPS 证书（Let's Encrypt webroot 模式）的
-        #   校验目录；如果服务器不用 webroot 方式续签证书，这段可以删掉。
-        uses: burnett01/rsync-deployments@7.0.1
-        with:
-          switches: "-avzr --delete --exclude=.well-known"
-          path: dist/
-          remote_path: /home/ubuntu/zero-to-tech/dist/
-          remote_host: ${{ secrets.SERVER_HOST }}
-          remote_port: 22
-          remote_user: ${{ secrets.SERVER_USER }}
-          remote_key: ${{ secrets.SERVER_SSH_KEY }}
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+        run: |
+          rsync -avzr --delete --exclude=.well-known \
+            -e "ssh -i ~/.ssh/deploy_key -p 22 -o StrictHostKeyChecking=accept-new" \
+            dist/ "$SERVER_USER@$SERVER_HOST:/home/ubuntu/zero-to-tech/dist/"
