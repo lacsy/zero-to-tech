@@ -1,0 +1,123 @@
+name: CI/CD
+
+# 什么时候跑：
+#   - 往 main 推代码         → 走完整流水线（构建 → 测试 → 部署）
+#   - 提 PR 到 main          → 只跑构建 + 测试，拦截坏代码（不部署）
+#   - 手动触发               → 在 Actions 页面点 "Run workflow"
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支连续推送时，取消上一次还没跑完的流水线，不浪费 runner 时间。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 默认只给读权限，需要写权限的 job 单独声明（最小权限原则）。
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+  # GitHub Pages 的「项目站点」固定挂在 https://<用户名>.github.io/<仓库名>/ 下，
+  # 静态资源前缀必须带上仓库名，否则 js/css 会 404。
+  # 若改成部署到 Nginx 根目录，把这里改成 "/" 即可（vite.config.js 会读取它）。
+  BASE_PATH: /${{ github.event.repository.name }}/
+
+jobs:
+  # ── 阶段一：构建 + 测试（所有分支都跑）────────────────────────────
+  build-and-test:
+    name: 构建与测试
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm # 缓存 npm 依赖，后续流水线提速
+
+      - name: 安装依赖
+        # 用 ci 而不是 install：严格按 package-lock.json 安装，版本可复现
+        run: npm ci
+
+      - name: 运行测试
+        run: npm test
+
+      - name: 生产构建
+        run: npm run build
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: dist
+          retention-days: 7
+
+  # ── 阶段二：部署到 GitHub Pages（仅 main 分支的 push）─────────────
+  # 依赖 build-and-test 成功：测试挂了就不会部署，坏代码进不了生产。
+  deploy:
+    name: 部署到 GitHub Pages
+    needs: build-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write # 发布 Pages
+      id-token: write # deploy-pages 需要的 OIDC 令牌
+    environment:
+      name: github-pages
+      url: ${{ steps.publish.outputs.page_url }}
+    steps:
+      - name: 下载构建产物
+        # 直接复用阶段一产出的 dist，不再重复安装依赖和构建
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: dist
+
+      - name: 配置 Pages
+        uses: actions/configure-pages@v5
+
+      - name: 打包 Pages 工件
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: 发布到 Pages
+        id: publish
+        uses: actions/deploy-pages@v4
+
+# ─────────────────────────────────────────────────────────────────
+# 附：若部署目标是模块 3.5 那台 Nginx 服务器（而非 GitHub Pages），
+# 把上面的 deploy job 换成下面这段，并在仓库 Settings → Secrets 里配置
+# SERVER_HOST / SERVER_USER / SERVER_SSH_KEY 三个密钥：
+#
+#  deploy:
+#    name: 部署到 Nginx 服务器
+#    needs: build-and-test
+#    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+#    runs-on: ubuntu-latest
+#    steps:
+#      - name: 下载构建产物
+#        uses: actions/download-artifact@v4
+#        with:
+#          name: web-dist
+#          path: dist
+#
+#      - name: 通过 rsync 推送到服务器
+#        uses: burnett01/rsync-deployments@7.0.1
+#        with:
+#          switches: -avzr --delete
+#          path: dist/
+#          remote_path: /var/www/zero-to-tech/
+#          remote_host: ${{ secrets.SERVER_HOST }}
+#          remote_user: ${{ secrets.SERVER_USER }}
+#          remote_key: ${{ secrets.SERVER_SSH_KEY }}
+#
+#  注意：此时要把上面 env 里的 BASE_PATH 改成 "/"。
+# ─────────────────────────────────────────────────────────────────
